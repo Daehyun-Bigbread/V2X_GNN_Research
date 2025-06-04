@@ -1,0 +1,2 @@
+model_checkpoint_path: "V2X_ASTGCN_GPU_pre_0-0"
+all_model_checkpoint_paths: "V2X_ASTGCN_GPU_pre_0-0"
