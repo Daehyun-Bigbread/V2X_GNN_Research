@@ -1,3 +1,5 @@
+# visualization.py
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -339,3 +341,203 @@ def plot_result_original(test_result, test_label1, path):
 def plot_error_original(train_rmse, train_loss, test_rmse, test_acc, test_mae, path):
     """원본 시각화 함수 (호환성용)"""
     plot_error(train_rmse, train_loss, test_rmse, test_acc, test_mae, path)
+
+# visualization.py 파일 끝에 다음 함수들을 추가하세요:
+
+def plot_anomaly_result(test_result, test_label, path):
+    """V2X 이상탐지 결과 시각화"""
+    try:
+        print(f"🚨 이상탐지 결과 시각화 중... 저장 위치: {path}")
+        
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
+        
+        # 1. 이상 확률 분포
+        anomaly_probs = test_result.flatten()
+        ax1.hist(anomaly_probs, bins=50, alpha=0.7, color='skyblue', edgecolor='black')
+        ax1.axvline(0.5, color='red', linestyle='--', label='Decision Threshold')
+        ax1.axvline(0.2, color='orange', linestyle='--', label='Adjusted Threshold')
+        ax1.set_xlabel('Anomaly Probability')
+        ax1.set_ylabel('Frequency')
+        ax1.set_title('V2X Grid Anomaly Probability Distribution')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        
+        # 2. 시간별 평균 이상 확률
+        time_steps = test_result.shape[0]
+        avg_anomaly_by_time = np.mean(test_result, axis=1)
+        ax2.plot(range(time_steps), avg_anomaly_by_time, 'b-', linewidth=2)
+        ax2.axhline(0.5, color='red', linestyle='--', alpha=0.7, label='Original Threshold')
+        ax2.axhline(0.2, color='orange', linestyle='--', alpha=0.7, label='Adjusted Threshold')
+        ax2.set_xlabel('Time Steps (15-min intervals)')
+        ax2.set_ylabel('Average Anomaly Probability')
+        ax2.set_title('V2X Grid Anomaly Trend Over Time')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        
+        # 3. 격자별 평균 이상 확률 (상위 50개만)
+        num_grids = min(50, test_result.shape[1])
+        avg_anomaly_by_grid = np.mean(test_result, axis=0)[:num_grids]
+        grid_ids = range(num_grids)
+        
+        bars = ax3.bar(grid_ids, avg_anomaly_by_grid, color='orange', alpha=0.7)
+        ax3.axhline(0.5, color='red', linestyle='--', alpha=0.7)
+        ax3.axhline(0.2, color='orange', linestyle='--', alpha=0.7)
+        ax3.set_xlabel('Grid ID')
+        ax3.set_ylabel('Average Anomaly Probability')
+        ax3.set_title(f'V2X Anomaly by Grid (Top {num_grids})')
+        ax3.grid(True, alpha=0.3)
+        
+        # 4. 실제 vs 예측 이상 비율
+        y_true_binary = (test_label.flatten() > 0.2).astype(int)
+        y_pred_binary_50 = (test_result.flatten() > 0.5).astype(int)
+        y_pred_binary_20 = (test_result.flatten() > 0.2).astype(int)
+        
+        actual_ratio = y_true_binary.mean()
+        pred_ratio_50 = y_pred_binary_50.mean()
+        pred_ratio_20 = y_pred_binary_20.mean()
+        
+        categories = ['Actual\nAnomalies', 'Predicted\n(Thresh=0.5)', 'Predicted\n(Thresh=0.2)']
+        ratios = [actual_ratio, pred_ratio_50, pred_ratio_20]
+        colors_bar = ['green', 'red', 'orange']
+        
+        bars = ax4.bar(categories, ratios, color=colors_bar, alpha=0.7)
+        ax4.set_ylabel('Anomaly Ratio')
+        ax4.set_title('V2X Anomaly Detection: Actual vs Predicted')
+        
+        # 값 표시
+        for bar, ratio in zip(bars, ratios):
+            ax4.text(bar.get_x() + bar.get_width()/2., bar.get_height() + 0.005,
+                    f'{ratio:.3f}', ha='center', va='bottom', fontweight='bold')
+        
+        ax4.grid(True, alpha=0.3, axis='y')
+        
+        plt.tight_layout()
+        plt.savefig(f'{path}/v2x_anomaly_results.jpg', dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print("✅ 이상탐지 결과 시각화 완료")
+        
+    except Exception as e:
+        print(f"❌ 이상탐지 결과 시각화 오류: {e}")
+
+def plot_anomaly_training(train_acc, train_loss, test_acc, test_f1, test_auc, test_precision, test_recall, path):
+    """V2X 이상탐지 학습 과정 시각화"""
+    try:
+        print(f"📈 이상탐지 학습 과정 시각화 중... 저장 위치: {path}")
+        
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
+        
+        epochs = range(1, len(train_acc) + 1)
+        
+        # 1. 정확도 곡선
+        ax1.plot(epochs, train_acc, 'b-', label='Train Accuracy', linewidth=2)
+        ax1.plot(epochs, test_acc, 'r-', label='Test Accuracy', linewidth=2)
+        ax1.set_xlabel('Epochs')
+        ax1.set_ylabel('Accuracy')
+        ax1.set_title('V2X Anomaly Detection: Accuracy Curves')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        
+        # 최고 정확도 표시
+        max_test_acc = max(test_acc)
+        max_epoch = test_acc.index(max_test_acc) + 1
+        ax1.axvline(max_epoch, color='green', linestyle='--', alpha=0.7)
+        ax1.text(max_epoch, max_test_acc, f'  Best: {max_test_acc:.3f}\n  @Epoch {max_epoch}',
+                fontsize=9, bbox=dict(boxstyle="round,pad=0.3", facecolor="yellow", alpha=0.7))
+        
+        # 2. 손실 곡선
+        ax2.plot(epochs, train_loss, 'g-', label='Training Loss', linewidth=2)
+        ax2.set_xlabel('Epochs')
+        ax2.set_ylabel('Loss')
+        ax2.set_title('V2X Anomaly Detection: Loss Curve')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        
+        # 3. F1 및 AUC 곡선
+        ax3.plot(epochs, test_f1, 'purple', label='F1-Score', linewidth=2)
+        ax3.plot(epochs, test_auc, 'orange', label='AUC', linewidth=2)
+        ax3.set_xlabel('Epochs')
+        ax3.set_ylabel('Score')
+        ax3.set_title('V2X Anomaly Detection: F1 & AUC Curves')
+        ax3.legend()
+        ax3.grid(True, alpha=0.3)
+        
+        # 최고 F1 점수 표시
+        max_f1 = max(test_f1)
+        max_f1_epoch = test_f1.index(max_f1) + 1
+        ax3.axvline(max_f1_epoch, color='purple', linestyle='--', alpha=0.7)
+        
+        # 4. 정밀도 및 재현율 곡선
+        ax4.plot(epochs, test_precision, 'cyan', label='Precision', linewidth=2)
+        ax4.plot(epochs, test_recall, 'magenta', label='Recall', linewidth=2)
+        ax4.set_xlabel('Epochs')
+        ax4.set_ylabel('Score')
+        ax4.set_title('V2X Anomaly Detection: Precision & Recall')
+        ax4.legend()
+        ax4.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(f'{path}/v2x_anomaly_training.jpg', dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print("✅ 이상탐지 학습 과정 시각화 완료")
+        
+    except Exception as e:
+        print(f"❌ 이상탐지 학습 과정 시각화 오류: {e}")
+
+def plot_anomaly_confusion_matrix(y_true, y_pred, path, threshold=0.2):
+    """V2X 이상탐지 혼동행렬 시각화"""
+    try:
+        from sklearn.metrics import confusion_matrix
+        
+        print(f"🔍 혼동행렬 시각화 중... 저장 위치: {path}")
+        
+        # 이진 분류를 위한 임계값 적용
+        y_true_binary = (y_true.flatten() > threshold).astype(int)
+        y_pred_binary = (y_pred.flatten() > threshold).astype(int)
+        
+        cm = confusion_matrix(y_true_binary, y_pred_binary)
+        
+        fig, ax = plt.subplots(figsize=(8, 6))
+        
+        # 혼동행렬 히트맵
+        im = ax.imshow(cm, interpolation='nearest', cmap='Blues')
+        ax.set_title(f'V2X Anomaly Detection Confusion Matrix\n(Threshold = {threshold})', 
+                    fontweight='bold')
+        
+        # 컬러바 추가
+        plt.colorbar(im, ax=ax)
+        
+        # 혼동행렬 라벨 추가
+        for i in range(cm.shape[0]):
+            for j in range(cm.shape[1]):
+                ax.text(j, i, str(cm[i, j]), ha="center", va="center", 
+                       color="white" if cm[i, j] > cm.max() / 2 else "black",
+                       fontsize=14, fontweight='bold')
+        
+        ax.set_xlabel('Predicted Label')
+        ax.set_ylabel('True Label')
+        ax.set_xticks([0, 1])
+        ax.set_yticks([0, 1])
+        ax.set_xticklabels(['Normal', 'Anomaly'])
+        ax.set_yticklabels(['Normal', 'Anomaly'])
+        
+        # 통계 정보 추가
+        tn, fp, fn, tp = cm.ravel()
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+        
+        stats_text = f'Precision: {precision:.3f}\nRecall: {recall:.3f}\nF1-Score: {f1:.3f}'
+        ax.text(1.05, 0.5, stats_text, transform=ax.transAxes, fontsize=11,
+               bbox=dict(boxstyle="round,pad=0.5", facecolor="lightblue", alpha=0.7),
+               verticalalignment='center')
+        
+        plt.tight_layout()
+        plt.savefig(f'{path}/v2x_confusion_matrix.jpg', dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print("✅ 혼동행렬 시각화 완료")
+        
+    except Exception as e:
+        print(f"❌ 혼동행렬 시각화 오류: {e}")

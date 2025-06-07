@@ -1,3 +1,5 @@
+# tgcn.py
+
 # -*- coding: utf-8 -*-
 import numpy as np
 import tensorflow.compat.v1 as tf  # TF 2.x 호환성

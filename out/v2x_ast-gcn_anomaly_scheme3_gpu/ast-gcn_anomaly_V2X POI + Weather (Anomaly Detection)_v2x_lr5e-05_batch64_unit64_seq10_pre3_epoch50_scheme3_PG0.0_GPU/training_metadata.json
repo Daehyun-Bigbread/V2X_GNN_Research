@@ -1,0 +1,16 @@
+{
+  "best_epoch": 0,
+  "final_threshold": 0.5,
+  "pos_weight_used": 5.462921315228634,
+  "confusion_matrix": [
+    [
+      122806,
+      245622
+    ],
+    [
+      21282,
+      42554
+    ]
+  ],
+  "training_time_seconds": 73.33699488639832
+}
