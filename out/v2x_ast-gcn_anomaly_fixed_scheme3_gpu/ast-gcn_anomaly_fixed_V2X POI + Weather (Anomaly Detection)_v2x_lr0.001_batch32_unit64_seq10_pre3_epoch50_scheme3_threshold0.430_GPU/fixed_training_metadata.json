@@ -1,0 +1,24 @@
+{
+  "model_type": "fixed_dynamic_threshold",
+  "optimal_threshold": 0.35,
+  "max_class_weight": 3.0,
+  "best_epoch": 0,
+  "best_f1": 0.0,
+  "final_pos_weight": 3.0,
+  "confusion_matrix": [
+    [
+      265836,
+      124908
+    ],
+    [
+      28163,
+      13357
+    ]
+  ],
+  "training_time_seconds": 134.92108488082886,
+  "data_statistics": {
+    "data_mean": 0.0674029141664505,
+    "data_std": 0.2209109365940094,
+    "anomaly_ratio": 0.07990534733177392
+  }
+}

@@ -1,2 +1,3 @@
-model_checkpoint_path: "V2X_ASTGCN_STABLE_BEST-11"
+model_checkpoint_path: "V2X_ASTGCN_STABLE_BEST-12"
 all_model_checkpoint_paths: "V2X_ASTGCN_STABLE_BEST-11"
+all_model_checkpoint_paths: "V2X_ASTGCN_STABLE_BEST-12"

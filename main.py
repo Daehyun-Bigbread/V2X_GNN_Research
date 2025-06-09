@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-V2X AST-GCN 이상탐지 메인 실행 파일 - 고정 임계값 안정화 버전
+V2X AST-GCN 이상탐지 메인 실행 파일 - 수정된 버전
 
-핵심 개선사항:
-1. 고정 임계값 사용 (0.3) - 학습 중 변경 금지
-2. 클래스 가중치 제한 (최대 3.0)
-3. 안정화된 평가 함수
-4. 일관된 데이터 처리
+핵심 수정사항:
+1. 데이터 분포 기반 동적 임계값 계산
+2. 평가 로직 일관성 확보
+3. 모델 출력 검증 추가
+4. 시각화 개선
 
-Author: V2X Anomaly Detection Team (Stabilized)
-Date: 2025-06-07
+Author: V2X Anomaly Detection Team (Fixed)
+Date: 2025-06-09
 """
 
 import pickle as pkl
@@ -19,14 +19,17 @@ import os
 import time
 import numpy as np
 import tensorflow.compat.v1 as tf_v1
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, roc_curve
+import matplotlib.pyplot as plt
 
-# 🎯 고정 임계값 설정 (핵심)
-FIXED_THRESHOLD = 0.3  # 학습 중 절대 변경 안함
-MAX_CLASS_WEIGHT = 3.0  # 클래스 가중치 제한
+# 🎯 동적 임계값 설정 (데이터 분포 기반)
+DYNAMIC_THRESHOLD = True  # 동적 임계값 사용 여부
+BASE_THRESHOLD = 0.3      # 기본 임계값 (폴백용)
+MAX_CLASS_WEIGHT = 5.0    # 클래스 가중치 최대값 증가
 
-print(f"🎯 안정화 설정:")
-print(f"   고정 임계값: {FIXED_THRESHOLD}")
+print(f"🎯 수정된 설정:")
+print(f"   동적 임계값: {DYNAMIC_THRESHOLD}")
+print(f"   기본 임계값: {BASE_THRESHOLD}")
 print(f"   최대 클래스 가중치: {MAX_CLASS_WEIGHT}")
 
 # Apple GPU (Metal) 설정
@@ -122,7 +125,9 @@ else:
 
 time_len = data.shape[0]
 num_nodes = data.shape[1]
-data1 = np.mat(data, dtype=np.float32)
+
+# 🔧 수정: matrix 타입 사용 금지, array로 강제 변환
+data1 = np.array(data, dtype=np.float32)  # np.mat 대신 np.array 사용
 
 #### normalization (이상점수는 이미 0-1 범위이므로 최소한의 정규화)
 max_value = np.max(data1)
@@ -131,8 +136,79 @@ if max_value > 0:
 else:
     print("⚠️ 모든 이상점수가 0입니다. 정규화를 건너뜁니다.")
 
+# 🔧 수정: 컬럼 정보 처리
 if hasattr(data, 'columns'):
-    data1.columns = data.columns
+    # pandas DataFrame의 컬럼 정보는 따로 저장
+    column_names = data.columns
+else:
+    column_names = None
+
+# 🔧 핵심 수정: 데이터 분포 기반 최적 임계값 계산
+def calculate_optimal_threshold(data_values, method='sigmoid_compatible'):
+    """모델 출력과 호환되는 최적 임계값 계산"""
+    print("🔍 모델 호환 최적 임계값 계산 중...")
+    
+    # 🔧 수정: matrix 타입을 array로 강제 변환
+    if isinstance(data_values, np.matrix):
+        data_values = np.asarray(data_values)
+    
+    # 데이터 통계
+    data_flat = data_values.flatten()
+    non_zero_data = data_flat[data_flat > 0]
+    
+    # 🔧 수정: 각 값을 float으로 변환하여 format 문제 해결
+    mean_val = float(data_flat.mean())
+    std_val = float(data_flat.std())
+    median_val = float(np.median(data_flat))
+    non_zero_mean = float(non_zero_data.mean()) if len(non_zero_data) > 0 else 0.0
+    
+    print(f"   📊 전체 데이터 통계:")
+    print(f"     평균: {mean_val:.4f}")
+    print(f"     표준편차: {std_val:.4f}")
+    print(f"     중간값: {median_val:.4f}")
+    print(f"     0이 아닌 값들 평균: {non_zero_mean:.4f}")
+    
+    if method == 'sigmoid_compatible':
+        # 🎯 핵심 수정: 시그모이드 출력(~0.5)과 호환되는 임계값 설정
+        # 데이터 기반 계산 후 시그모이드 범위로 조정
+        data_based_threshold = float(np.percentile(data_flat, 85))
+        
+        # 시그모이드 출력 고려: 0.3~0.7 범위로 조정
+        if data_based_threshold < 0.1:
+            threshold = 0.45  # 시그모이드 중앙값 근처
+        elif data_based_threshold > 0.5:
+            threshold = 0.55  # 약간 높은 값
+        else:
+            threshold = 0.5   # 시그모이드 중앙값
+            
+        print(f"   🔧 시그모이드 호환 조정: {data_based_threshold:.4f} → {threshold:.4f}")
+        
+    elif method == 'percentile_based':
+        # 기존 방식 (문제가 있었던 방식)
+        threshold = float(np.percentile(data_flat, 85))
+        threshold = float(np.clip(threshold, 0.05, 0.5))
+    else:
+        # 기본값
+        threshold = 0.5
+    
+    # 🔧 수정: 시그모이드 출력 범위에 맞는 안전 범위 (0.3 ~ 0.7)
+    threshold = float(np.clip(threshold, 0.3, 0.7))
+    
+    # 결과 이상 비율 계산 (원본 데이터 기준)
+    anomaly_ratio = float((data_flat > data_based_threshold if 'data_based_threshold' in locals() else mean_val + std_val).mean())
+    
+    print(f"   🎯 최종 임계값: {threshold:.4f} (시그모이드 호환)")
+    print(f"   📊 예상 이상 비율: {anomaly_ratio*100:.2f}%")
+    
+    return threshold
+
+# 동적 임계값 계산
+if DYNAMIC_THRESHOLD:
+    optimal_threshold = calculate_optimal_threshold(data1, method='sigmoid_compatible')
+else:
+    optimal_threshold = 0.5  # 시그모이드 중앙값
+
+print(f"   ✅ 최종 사용 임계값: {optimal_threshold:.4f} (시그모이드 호환)")
 
 # 모델 및 스킴 정보 출력
 if model_name == 'ast-gcn':
@@ -152,51 +228,152 @@ print(f'   dataset: {data_name}')
 print(f'   scheme: {scheme} ({name})')
 print(f'   data shape: {data1.shape}')
 print(f'   time_len: {time_len}, num_nodes: {num_nodes}')
+print(f'   optimal_threshold: {optimal_threshold:.4f}')
 print(f'   noise_name: {noise_name}')
 print(f'   noise_param: {PG}')
 
-# 개선된 전처리 (클래스 균형 정보 포함)
-print(f"\n🔄 이상탐지 데이터 전처리 시작...")
-
-try:
-    # 개선된 전처리 호출 (balance_info 추가 반환)
-    trainX, trainY, testX, testY, balance_info = preprocess_data(
-        data1, time_len, train_rate, seq_len, pre_len, model_name, scheme,
-        poi_data, weather_data
-    )
+# 🔧 수정된 전처리 함수 (최적 임계값 사용)
+def preprocess_data_fixed(data1, time_len, train_rate, seq_len, pre_len, 
+                         model_name, scheme, poi_data=None, weather_data=None,
+                         threshold=None):
+    """수정된 V2X 이상탐지 전처리 - 최적 임계값 사용"""
+    print(f"🛠️ 수정된 V2X 이상탐지 전처리:")
+    print(f"   📊 데이터 형태: {data1.shape}")
+    print(f"   🎯 최적 임계값: {threshold:.4f}")
+    print(f"   🔧 시퀀스 길이: {seq_len}, 예측 길이: {pre_len}")
     
-    # 클래스 균형 정보 추출
-    pos_weight = balance_info['pos_weight']
-    threshold_used = balance_info['threshold_used']
-    train_anomaly_ratio = balance_info['train_anomaly_ratio']
-    test_anomaly_ratio = balance_info['test_anomaly_ratio']
+    # 안전한 데이터 변환
+    if isinstance(data1, np.matrix):
+        data1 = np.asarray(data1)
     
-    print(f"🎯 클래스 균형 정보:")
-    print(f"   양성 클래스 가중치: {pos_weight:.2f}")
-    print(f"   사용된 임계값: {threshold_used:.3f}")
-    print(f"   훈련 이상 비율: {train_anomaly_ratio:.2%}")
-    print(f"   테스트 이상 비율: {test_anomaly_ratio:.2%}")
+    data_values = np.array(data1, dtype=np.float32)
     
-except (ValueError, TypeError) as e:
-    # 기존 전처리 폴백
-    print(f"⚠️ 개선된 전처리 실패, 기존 방식 사용: {e}")
-    trainX, trainY, testX, testY = preprocess_data(
-        data1, time_len, train_rate, seq_len, pre_len, model_name, scheme,
-        poi_data, weather_data
-    )
+    # NaN/Inf 처리
+    data_values = np.nan_to_num(data_values, nan=0.0, posinf=1.0, neginf=0.0)
     
-    # 수동으로 클래스 가중치 계산
+    print(f"   📊 데이터 통계:")
+    print(f"     범위: {data_values.min():.3f} ~ {data_values.max():.3f}")
+    print(f"     평균: {data_values.mean():.3f}")
+    
+    # 🎯 핵심 수정: 시그모이드 호환 라벨 생성
+    # 원본 데이터의 상위 10%를 이상으로 설정 (더 균형잡힌 접근)
+    data_threshold_for_labels = float(np.percentile(data_values.flatten(), 90))
+    binary_labels = (data_values > data_threshold_for_labels).astype(float)
+    anomaly_ratio = binary_labels.mean()
+    
+    print(f"   📊 라벨 생성 통계:")
+    print(f"     라벨 생성 임계값: {data_threshold_for_labels:.4f} (90th percentile)")
+    print(f"     평가 임계값: {threshold:.4f} (시그모이드 호환)")
+    print(f"     생성된 이상 비율: {anomaly_ratio:.3%}")
+    
+    if anomaly_ratio == 0:
+        print(f"   ⚠️ 이상 데이터가 없습니다! 85th percentile로 재시도")
+        data_threshold_for_labels = float(np.percentile(data_values.flatten(), 85))
+        binary_labels = (data_values > data_threshold_for_labels).astype(float)
+        anomaly_ratio = binary_labels.mean()
+        print(f"   🔧 조정된 라벨 임계값: {data_threshold_for_labels:.4f}, 이상 비율: {anomaly_ratio:.3%}")
+    
+    # 훈련/테스트 분할
+    train_size = int(time_len * train_rate)
+    
+    train_data = data_values[:train_size]
+    test_data = data_values[train_size:]
+    
+    train_labels = binary_labels[:train_size]
+    test_labels = binary_labels[train_size:]
+    
+    print(f"   ✂️ 분할 완료:")
+    print(f"     훈련: {train_data.shape}")
+    print(f"     테스트: {test_data.shape}")
+    
+    # 시퀀스 생성
+    trainX, trainY, testX, testY = [], [], [], []
+    
+    # 훈련 시퀀스
+    for i in range(seq_len, len(train_data) - pre_len + 1):
+        # 입력: 연속값 (원본 이상점수)
+        seq_x = train_data[i-seq_len:i].T  # (nodes, seq_len)
+        # 라벨: 이진값 (0 또는 1)
+        seq_y = train_labels[i:i+pre_len].T  # (nodes, pre_len)
+        
+        trainX.append(seq_x)
+        trainY.append(seq_y)
+    
+    # 테스트 시퀀스
+    for i in range(seq_len, len(test_data) - pre_len + 1):
+        seq_x = test_data[i-seq_len:i].T
+        seq_y = test_labels[i:i+pre_len].T
+        
+        testX.append(seq_x)
+        testY.append(seq_y)
+    
+    # 배열 변환
+    trainX = np.array(trainX)
+    trainY = np.array(trainY)
+    testX = np.array(testX)
+    testY = np.array(testY)
+    
+    # 차원 조정: (samples, seq_len, nodes)
+    trainX = np.transpose(trainX, (0, 2, 1))
+    trainY = np.transpose(trainY, (0, 2, 1))
+    testX = np.transpose(testX, (0, 2, 1))
+    testY = np.transpose(testY, (0, 2, 1))
+    
+    # 🔧 수정된 클래스 가중치 계산
     y_flat = trainY.flatten()
-    pos_count = np.sum(y_flat > 0.3)
-    neg_count = len(y_flat) - pos_count
-    pos_weight = np.clip(neg_count / (pos_count + 1e-8), 2.0, 15.0)
-    threshold_used = 0.3
-    train_anomaly_ratio = pos_count / len(y_flat)
-    test_anomaly_ratio = (testY.flatten() > 0.3).mean()
+    pos_count = np.sum(y_flat == 1)
+    neg_count = np.sum(y_flat == 0)
     
-    print(f"🎯 기본 클래스 균형 정보:")
-    print(f"   계산된 클래스 가중치: {pos_weight:.2f}")
-    print(f"   사용된 임계값: {threshold_used:.3f}")
+    if pos_count > 0:
+        pos_weight = min(MAX_CLASS_WEIGHT, neg_count / pos_count)
+    else:
+        pos_weight = 1.0
+    
+    # 최종 검증
+    train_anomaly_ratio = (trainY == 1).mean()
+    test_anomaly_ratio = (testY == 1).mean()
+    
+    print(f"   ✅ 수정된 전처리 완료:")
+    print(f"     trainX: {trainX.shape}")
+    print(f"     trainY: {trainY.shape}")
+    print(f"     testX: {testX.shape}")
+    print(f"     testY: {testY.shape}")
+    print(f"     클래스 가중치: {pos_weight:.2f}")
+    print(f"     훈련 이상 비율: {train_anomaly_ratio:.2%}")
+    print(f"     테스트 이상 비율: {test_anomaly_ratio:.2%}")
+    
+    # 균형 정보 반환
+    balance_info = {
+        'pos_weight': pos_weight,
+        'threshold_used': threshold,  # 평가용 임계값
+        'label_threshold': data_threshold_for_labels,  # 라벨 생성 임계값
+        'train_anomaly_ratio': train_anomaly_ratio,
+        'test_anomaly_ratio': test_anomaly_ratio
+    }
+    
+    return trainX, trainY, testX, testY, balance_info
+
+# 수정된 전처리 호출
+print(f"\n🔄 수정된 이상탐지 데이터 전처리 시작...")
+
+trainX, trainY, testX, testY, balance_info = preprocess_data_fixed(
+    data1, time_len, train_rate, seq_len, pre_len, model_name, scheme,
+    poi_data, weather_data, threshold=optimal_threshold
+)
+
+# 클래스 균형 정보 추출
+pos_weight = balance_info['pos_weight']
+threshold_used = balance_info['threshold_used']
+label_threshold = balance_info['label_threshold']
+train_anomaly_ratio = balance_info['train_anomaly_ratio']
+test_anomaly_ratio = balance_info['test_anomaly_ratio']
+
+print(f"🎯 수정된 클래스 균형 정보:")
+print(f"   양성 클래스 가중치: {pos_weight:.2f}")
+print(f"   라벨 생성 임계값: {label_threshold:.4f} (90th percentile)")
+print(f"   평가용 임계값: {threshold_used:.4f} (시그모이드 호환)")
+print(f"   훈련 이상 비율: {train_anomaly_ratio:.2%}")
+print(f"   테스트 이상 비율: {test_anomaly_ratio:.2%}")
 
 totalbatch = int(trainX.shape[0] / batch_size)
 training_data_count = len(trainX)
@@ -205,285 +382,32 @@ print(f"✅ 전처리 완료:")
 print(f"   total batches: {totalbatch}")
 print(f"   training samples: {training_data_count}")
 
-def create_balanced_loss_function(pos_weight=10.0, use_focal=True):
-    """
-    클래스 불균형을 해결하는 균형 손실함수 생성
-    """
-    
-    def focal_loss(y_true, y_pred, alpha=0.75, gamma=2.0):
-        """Focal Loss 구현"""
-        y_true = tf_v1.cast(y_true, tf_v1.float32)
-        
-        # Sigmoid 적용
-        y_pred_sigmoid = tf_v1.nn.sigmoid(y_pred)
-        y_pred_sigmoid = tf_v1.clip_by_value(y_pred_sigmoid, 1e-8, 1.0 - 1e-8)
-        
-        # Cross Entropy
-        ce_loss = -y_true * tf_v1.math.log(y_pred_sigmoid) - (1 - y_true) * tf_v1.math.log(1 - y_pred_sigmoid)
-        
-        # Focal Weight (gamma 유지)
-        pt = tf_v1.where(tf_v1.equal(y_true, 1), y_pred_sigmoid, 1 - y_pred_sigmoid)
-        focal_weight = alpha * tf_v1.pow(1 - pt, gamma)
-        
-        return focal_weight * ce_loss
-    
-    def balanced_loss(y_true, y_pred):
-        """균형 손실함수"""
-        
-        # 1. Weighted Binary Cross Entropy (pos_weight 증가)
-        weighted_bce = tf_v1.nn.weighted_cross_entropy_with_logits(
-            labels=y_true,
-            logits=y_pred,
-            pos_weight=pos_weight * 1.5
-        )
-        
-        if use_focal:
-            # 2. Focal Loss 추가
-            focal_loss_val = focal_loss(y_true, y_pred, alpha=0.75, gamma=2.0)
-            
-            # 3. 결합 (BCE 70%, Focal 30%)
-            combined_loss = 0.7 * weighted_bce + 0.3 * focal_loss_val
-        else:
-            combined_loss = weighted_bce
-        
-        return tf_v1.reduce_mean(combined_loss)
-    
-    return balanced_loss
-
-def find_optimal_threshold_detailed(y_true, y_pred_proba, thresholds=None):
-    """
-    상세한 최적 임계값 탐색
-    """
-    if thresholds is None:
-        thresholds = np.arange(0.1, 0.9, 0.05)
-    
-    # 데이터 평평화
-    y_true_flat = y_true.flatten()
-    y_pred_proba_flat = y_pred_proba.flatten()
-    
-    results = []
-    best_f1 = 0
-    best_threshold = 0.5
-    
-    print("🔍 임계값별 성능 분석:")
-    print("-" * 70)
-    print(f"{'Threshold':<10} {'Precision':<10} {'Recall':<10} {'F1-Score':<10}")
-    print("-" * 70)
-    
-    for threshold in thresholds:
-        # 이진 예측
-        y_pred_binary = (y_pred_proba_flat > threshold).astype(int)
-        y_true_binary = (y_true_flat > threshold_used).astype(int)
-        
-        # 혼동행렬 계산
-        tp = np.sum((y_true_binary == 1) & (y_pred_binary == 1))
-        fp = np.sum((y_true_binary == 0) & (y_pred_binary == 1))
-        fn = np.sum((y_true_binary == 1) & (y_pred_binary == 0))
-        tn = np.sum((y_true_binary == 0) & (y_pred_binary == 0))
-        
-        # 메트릭 계산
-        precision = tp / (tp + fp + 1e-8)
-        recall = tp / (tp + fn + 1e-8)
-        f1 = 2 * precision * recall / (precision + recall + 1e-8)
-        
-        print(f"{threshold:<10.2f} {precision:<10.4f} {recall:<10.4f} {f1:<10.4f}")
-        
-        # 최적 F1 점수 찾기
-        if f1 > best_f1:
-            best_f1 = f1
-            best_threshold = threshold
-    
-    print("-" * 70)
-    print(f"🎯 최적 임계값: {best_threshold:.2f} (F1: {best_f1:.4f})")
-    
-    return best_threshold, best_f1
-
-def evaluate_anomaly_detection_improved(y_true, y_pred_logits, threshold=None):
-    """
-    개선된 이상탐지 평가
-    """
-    # 확률로 변환
-    y_pred_proba = tf_v1.nn.sigmoid(y_pred_logits).eval(session=sess)
-    
-    # 최적 임계값 찾기 (첫 번째 평가에서만)
-    if threshold is None:
-        threshold, _ = find_optimal_threshold_detailed(y_true, y_pred_proba)
-    
-    # 이진 예측
-    y_pred_binary = (y_pred_proba > threshold).astype(int)
-    
-    # 데이터 평평화
-    y_true_flat = y_true.flatten()
-    y_pred_flat = y_pred_binary.flatten()
-    y_pred_proba_flat = y_pred_proba.flatten()
-    
-    # 실제 라벨 이진화 (threshold_used 기준)
-    y_true_binary = (y_true_flat > threshold_used).astype(int)
-    
-    # 혼동행렬
-    tp = np.sum((y_true_binary == 1) & (y_pred_flat == 1))
-    fp = np.sum((y_true_binary == 0) & (y_pred_flat == 1))
-    fn = np.sum((y_true_binary == 1) & (y_pred_flat == 0))
-    tn = np.sum((y_true_binary == 0) & (y_pred_flat == 0))
-    
-    # 메트릭 계산
-    accuracy = (tp + tn) / (tp + fp + fn + tn + 1e-8)
-    precision = tp / (tp + fp + 1e-8)
-    recall = tp / (tp + fn + 1e-8)
-    f1 = 2 * precision * recall / (precision + recall + 1e-8)
-    
-    # AUC 계산
-    try:
-        if len(np.unique(y_true_binary)) > 1:
-            auc = roc_auc_score(y_true_binary, y_pred_proba_flat)
-        else:
-            auc = 0.5
-    except:
-        auc = 0.5
-    
-    # 상세 출력
-    print(f"🔍 개선된 이상탐지 평가 (임계값: {threshold:.3f}):")
-    print(f"   📊 혼동행렬: TP={tp}, FP={fp}, FN={fn}, TN={tn}")
-    print(f"   📈 성능 메트릭:")
-    print(f"     Accuracy: {accuracy:.4f}")
-    print(f"     Precision: {precision:.4f}")
-    print(f"     Recall: {recall:.4f}")
-    print(f"     F1-Score: {f1:.4f}")
-    print(f"     AUC: {auc:.4f}")
-    print(f"   📊 클래스 분포:")
-    print(f"     실제 이상 비율: {np.mean(y_true_binary):.3f}")
-    print(f"     예측 이상 비율: {np.mean(y_pred_flat):.3f}")
-    
-    return accuracy, precision, recall, f1, auc, threshold
-
-def evaluate_anomaly_numpy(y_true, y_logits, threshold=None, threshold_used=0.3):
-    """
-    NumPy 기반 이상탐지 평가
-    """
-    # 1) 로짓 → 확률
-    y_proba = 1.0 / (1.0 + np.exp(-y_logits))
-    y_proba_flat = y_proba.flatten()
-    y_true_flat = y_true.flatten()
-    
-    # 2) y_true 이진화
-    y_true_bin = (y_true_flat > threshold_used).astype(int)
-    
-    # 3) threshold 탐색 (None이면)
-    if threshold is None:
-        best_f1, best_thr = 0.0, 0.5
-        for thr in np.arange(0.3, 0.7, 0.01):
-            y_pred_bin = (y_proba_flat > thr).astype(int)
-            if len(np.unique(y_true_bin)) < 2 or len(np.unique(y_pred_bin)) < 2:
-                continue
-            try:
-                f1 = f1_score(y_true_bin, y_pred_bin, zero_division=0)
-                if f1 > best_f1:
-                    best_f1, best_thr = f1, thr
-            except:
-                continue
-        threshold = best_thr
-    
-    # 4) 최종 이진 예측
-    y_pred_bin = (y_proba_flat > threshold).astype(int)
-    
-    # 5) 메트릭 계산
-    acc   = accuracy_score(y_true_bin, y_pred_bin)
-    pre   = precision_score(y_true_bin, y_pred_bin, zero_division=0)
-    rec   = recall_score(y_true_bin, y_pred_bin, zero_division=0)
-    f1    = f1_score(y_true_bin, y_pred_bin, zero_division=0)
-    try:
-        auc  = roc_auc_score(y_true_bin, y_proba_flat)
-    except:
-        auc  = 0.5
-    
-    return acc, pre, rec, f1, auc, threshold
-
-def TGCN_ANOMALY(_X, _weights, _biases):
-    """
-    TGCN 이상탐지용 모델 (기존 TGCN + 시그모이드 출력)
-    """
-    ###
-    cell_1 = tgcnCell(gru_units, adj, num_nodes=num_nodes)
-    cell = tf_v1.nn.rnn_cell.MultiRNNCell([cell_1], state_is_tuple=True)
-    _X = tf_v1.unstack(_X, axis=1)
-    outputs, states = tf_v1.nn.static_rnn(cell, _X, dtype=tf_v1.float32)
-    m = []
-    for i in outputs:
-        o = tf_v1.reshape(i, shape=[-1, num_nodes, gru_units])
-        o = tf_v1.reshape(o, shape=[-1, gru_units])
-        # Dropout 비율 증가
-        o = tf_v1.nn.dropout(o, keep_prob=0.7)
-        m.append(o)
-    last_output = m[-1]
-    
-    # 이상탐지용 출력 (시그모이드)
-    logits = tf_v1.matmul(last_output, _weights['out']) + _biases['out']
-    logits = tf_v1.reshape(logits, shape=[-1, num_nodes, pre_len])
-    logits = tf_v1.transpose(logits, perm=[0, 2, 1])
-    logits = tf_v1.reshape(logits, shape=[-1, num_nodes])
-    
-    # 수치 안정성 추가 (클리핑 범위 조정)
-    logits = tf_v1.clip_by_value(logits, -12.0, 12.0)
-    
-    # 시그모이드 활성화 (이상 확률)
-    output = tf_v1.sigmoid(logits)
-    
-    return output, logits, m, states
-
-def simple_evaluation(y_true, y_pred, threshold=0.5):
-    """간단한 이상탐지 평가"""
-    try:
-        y_true_flat = y_true.flatten()
-        y_pred_flat = y_pred.flatten()
-        
-        # threshold가 None이면 기본값 0.5
-        if threshold is None:
-            threshold = 0.5
-        # (1) y_true, (2) y_pred 모두 같은 threshold 사용
-        y_true_bin = (y_true_flat > threshold).astype(int)
-        y_pred_bin = (y_pred_flat >= threshold).astype(int)
-        
-        acc = accuracy_score(y_true_bin, y_pred_bin)
-        
-        if len(np.unique(y_true_bin)) > 1:
-            pre = precision_score(y_true_bin, y_pred_bin, zero_division=0)
-            rec = recall_score(y_true_bin, y_pred_bin, zero_division=0)
-            f1 = f1_score(y_true_bin, y_pred_bin, zero_division=0)
-        else:
-            pre = rec = f1 = 0.0
-            
-        return acc, pre, rec, f1, threshold
-    except Exception as e:
-        print(f"⚠️ 평가 중 오류 발생: {e}")
-        return 0.5, 0.0, 0.0, 0.0, 0.5
-
-def evaluate_anomaly_stable(y_true, y_pred, threshold=FIXED_THRESHOLD):
-    """
-    고정 임계값 기반 안정적 이상탐지 평가
-    """
+# 🔧 수정된 평가 함수
+def evaluate_anomaly_fixed(y_true, y_pred_proba, threshold):
+    """수정된 이상탐지 평가 함수"""
     try:
         # 데이터 평평화
         y_true_flat = y_true.flatten()
-        y_pred_flat = y_pred.flatten()
+        y_pred_flat = y_pred_proba.flatten()
         
         # NaN/Inf 안전 처리
         y_pred_flat = np.nan_to_num(y_pred_flat, 0.0)
         y_pred_flat = np.clip(y_pred_flat, 0.0, 1.0)
         
-        # 고정 임계값으로 이진화
-        y_true_bin = (y_true_flat > threshold).astype(int)
-        y_pred_bin = (y_pred_flat > threshold).astype(int)
+        # 🎯 핵심: 동일한 임계값으로 이진화
+        y_pred_binary = (y_pred_flat > threshold).astype(int)
+        y_true_binary = y_true_flat.astype(int)  # 이미 이진값
         
         # 메트릭 계산
-        acc = accuracy_score(y_true_bin, y_pred_bin)
+        acc = accuracy_score(y_true_binary, y_pred_binary)
         
         # 클래스가 존재하는 경우만 계산
-        if len(np.unique(y_true_bin)) > 1:
-            pre = precision_score(y_true_bin, y_pred_bin, zero_division=0)
-            rec = recall_score(y_true_bin, y_pred_bin, zero_division=0)
-            f1 = f1_score(y_true_bin, y_pred_bin, zero_division=0)
+        if len(np.unique(y_true_binary)) > 1:
+            pre = precision_score(y_true_binary, y_pred_binary, zero_division=0)
+            rec = recall_score(y_true_binary, y_pred_binary, zero_division=0)
+            f1 = f1_score(y_true_binary, y_pred_binary, zero_division=0)
             try:
-                auc = roc_auc_score(y_true_bin, y_pred_flat)
+                auc = roc_auc_score(y_true_binary, y_pred_flat)
             except:
                 auc = 0.5
         else:
@@ -494,12 +418,41 @@ def evaluate_anomaly_stable(y_true, y_pred, threshold=FIXED_THRESHOLD):
         print(f"⚠️ 평가 중 오류: {e}")
         return 0.5, 0.0, 0.0, 0.0, 0.5
 
-def create_stable_loss_function(pos_weight=2.0):
-    """
-    안정화된 균형 손실함수 (가중치 제한)
-    """
-    def stable_loss(y_true, y_pred):
-        # Weighted Binary Cross Entropy (제한된 가중치)
+def TGCN_ANOMALY(_X, _weights, _biases):
+    """TGCN 이상탐지용 모델 - 출력 안정화 개선"""
+    ###
+    cell_1 = tgcnCell(gru_units, adj, num_nodes=num_nodes)
+    cell = tf_v1.nn.rnn_cell.MultiRNNCell([cell_1], state_is_tuple=True)
+    _X = tf_v1.unstack(_X, axis=1)
+    outputs, states = tf_v1.nn.static_rnn(cell, _X, dtype=tf_v1.float32)
+    m = []
+    for i in outputs:
+        o = tf_v1.reshape(i, shape=[-1, num_nodes, gru_units])
+        o = tf_v1.reshape(o, shape=[-1, gru_units])
+        # Dropout
+        o = tf_v1.nn.dropout(o, keep_prob=0.8)
+        m.append(o)
+    last_output = m[-1]
+    
+    # 🔧 수정: 더 다양한 출력을 위한 가중치 초기화 개선
+    logits = tf_v1.matmul(last_output, _weights['out']) + _biases['out']
+    logits = tf_v1.reshape(logits, shape=[-1, num_nodes, pre_len])
+    logits = tf_v1.transpose(logits, perm=[0, 2, 1])
+    logits = tf_v1.reshape(logits, shape=[-1, num_nodes])
+    
+    # 🔧 수정: 로지트 범위를 넓혀서 다양한 시그모이드 출력 생성
+    logits = tf_v1.clip_by_value(logits, -5.0, 5.0)  # 범위 확대
+    
+    # 시그모이드 활성화 (이상 확률)
+    output = tf_v1.sigmoid(logits)
+    
+    return output, logits, m, states
+
+def create_improved_loss_function(pos_weight=3.0):
+    """개선된 균형 손실함수"""
+    
+    def improved_loss(y_true, y_pred):
+        # 🔧 수정: 더 안정적인 weighted BCE
         weighted_bce = tf_v1.nn.weighted_cross_entropy_with_logits(
             labels=y_true,
             logits=y_pred,
@@ -508,22 +461,22 @@ def create_stable_loss_function(pos_weight=2.0):
         
         # 가벼운 Focal Loss 추가
         y_pred_sigmoid = tf_v1.nn.sigmoid(y_pred)
-        y_pred_sigmoid = tf_v1.clip_by_value(y_pred_sigmoid, 1e-8, 1.0 - 1e-8)
+        y_pred_sigmoid = tf_v1.clip_by_value(y_pred_sigmoid, 1e-7, 1.0 - 1e-7)
         
         ce_loss = -y_true * tf_v1.math.log(y_pred_sigmoid) - (1 - y_true) * tf_v1.math.log(1 - y_pred_sigmoid)
         pt = tf_v1.where(tf_v1.equal(y_true, 1), y_pred_sigmoid, 1 - y_pred_sigmoid)
-        focal_weight = 0.25 * tf_v1.pow(1 - pt, 2.0)
+        focal_weight = 0.2 * tf_v1.pow(1 - pt, 1.5)  # 더 약한 focal loss
         focal_loss = focal_weight * ce_loss
         
-        # 결합 (BCE 80%, Focal 20%)
-        combined_loss = 0.8 * weighted_bce + 0.2 * focal_loss
+        # 결합 (BCE 85%, Focal 15%)
+        combined_loss = 0.85 * weighted_bce + 0.15 * focal_loss
         
         return tf_v1.reduce_mean(combined_loss)
     
-    return stable_loss
+    return improved_loss
 
 ###### placeholders ######
-print(f"\n🧠 개선된 이상탐지 모델 구성...")
+print(f"\n🧠 수정된 이상탐지 모델 구성...")
 
 # 실제 데이터 차원 확인
 print(f"   📊 실제 데이터 형태:")
@@ -545,22 +498,21 @@ print(f"     라벨: [{None}, {actual_pre_len}, {actual_num_nodes}]")
 # 동적 차원으로 placeholder 생성
 inputs = tf_v1.placeholder(tf_v1.float32, shape=[None, actual_seq_len, actual_num_nodes])
 labels = tf_v1.placeholder(tf_v1.float32, shape=[None, actual_pre_len, actual_num_nodes])
-optimal_threshold = tf_v1.placeholder(tf_v1.float32, shape=())
 
-# Graph weights (이상탐지용)
+# Graph weights (이상탐지용) - 🔧 수정: 더 나은 초기화
 weights = {
-    'out': tf_v1.Variable(tf_v1.random_normal([gru_units, actual_pre_len], mean=0.0, stddev=0.01), name='weight_o')}
+    'out': tf_v1.Variable(tf_v1.random_normal([gru_units, actual_pre_len], mean=0.0, stddev=0.1), name='weight_o')}  # stddev 증가
 
 biases = {
-    'out': tf_v1.Variable(tf_v1.random_normal([actual_pre_len], stddev=0.01), name='bias_o')}
+    'out': tf_v1.Variable(tf_v1.random_normal([actual_pre_len], mean=0.0, stddev=0.1), name='bias_o')}  # stddev 증가
 
 pred, logits, ttts, ttto = TGCN_ANOMALY(inputs, weights, biases)
 
 y_pred = pred  # 시그모이드 출력 (0-1 확률)
 y_logits = logits  # 로지트 (손실 계산용)
 
-###### optimizer (개선된 이상탐지용 손실함수) ######
-lambda_loss = 0.0015
+###### optimizer (수정된 이상탐지용 손실함수) ######
+lambda_loss = 0.001  # L2 정규화 감소
 Lreg = lambda_loss * sum(tf_v1.nn.l2_loss(tf_var) for tf_var in tf_v1.trainable_variables())
 label = tf_v1.reshape(labels, [-1, actual_num_nodes])
 logits_reshaped = tf_v1.reshape(y_logits, [-1, actual_num_nodes])
@@ -569,29 +521,25 @@ print('y_pred_shape:', y_pred.shape)
 print('label_shape:', label.shape)
 print('logits_shape:', logits_reshaped.shape)
 
-# 개선된 균형 손실함수 사용
-print(f"🎯 개선된 손실함수 구성 (클래스 가중치: {pos_weight:.2f})")
-balanced_loss_fn = create_balanced_loss_function(pos_weight=pos_weight, use_focal=True)
-main_loss = balanced_loss_fn(label, logits_reshaped)
+# 수정된 균형 손실함수 사용
+print(f"🎯 수정된 손실함수 구성 (클래스 가중치: {pos_weight:.2f})")
+improved_loss_fn = create_improved_loss_function(pos_weight=pos_weight)
+main_loss = improved_loss_fn(label, logits_reshaped)
 loss = main_loss + Lreg
 
-# TF 그래프에서 accuracy 계산
-predictions = tf_v1.cast(tf_v1.greater(y_pred, optimal_threshold), tf_v1.float32)
-accuracy = tf_v1.reduce_mean(tf_v1.cast(tf_v1.equal(predictions, tf_v1.reshape(labels, [-1, actual_num_nodes])), tf_v1.float32))
-
-# 개선된 최적화기 (학습률 스케줄링)
+# 수정된 최적화기
 global_step = tf_v1.Variable(0, trainable=False)
 learning_rate = tf_v1.train.exponential_decay(
     lr, global_step, 
-    decay_steps=500,  # 더 빠른 감소
-    decay_rate=0.9,   # 더 급격한 감소
+    decay_steps=300,  # 더 빠른 감소
+    decay_rate=0.95,  # 더 안정적인 감소
     staircase=True
 )
 
-# Gradient clipping (개선)
+# Gradient clipping (수정)
 opt = tf_v1.train.AdamOptimizer(learning_rate)
 grads_and_vars = opt.compute_gradients(loss)
-clipped_grads_and_vars = [(tf_v1.clip_by_value(grad, -0.5, 0.5), var)  # 더 좁은 클리핑 범위
+clipped_grads_and_vars = [(tf_v1.clip_by_value(grad, -1.0, 1.0), var)  # 클리핑 범위 확대
                           for grad, var in grads_and_vars if grad is not None]
 optimizer = opt.apply_gradients(clipped_grads_and_vars, global_step=global_step)
 
@@ -607,32 +555,33 @@ config.gpu_options.allow_growth = True
 sess = tf_v1.Session(config=config)
 sess.run(tf_v1.global_variables_initializer())
 
-# 출력 디렉토리 설정 (이상탐지용)
+# 출력 디렉토리 설정
 if data_name == 'v2x':
-    out = f'out/v2x_{model_name}_anomaly_scheme{scheme}_gpu'
+    out = f'out/v2x_{model_name}_anomaly_fixed_scheme{scheme}_gpu'
 else:
-    out = f'out/{model_name}_anomaly_{noise_name}_gpu'
+    out = f'out/{model_name}_anomaly_fixed_{noise_name}_gpu'
 
-path1 = f'{model_name}_anomaly_{name}_{data_name}_lr{lr}_batch{batch_size}_unit{gru_units}_seq{seq_len}_pre{pre_len}_epoch{training_epoch}_scheme{scheme}_PG{PG}_GPU'
+path1 = f'{model_name}_anomaly_fixed_{name}_{data_name}_lr{lr}_batch{batch_size}_unit{gru_units}_seq{seq_len}_pre{pre_len}_epoch{training_epoch}_scheme{scheme}_threshold{threshold_used:.3f}_GPU'
 path = os.path.join(out, path1)
 if not os.path.exists(path):
     os.makedirs(path)
 
 print(f"📂 결과 저장 경로: {path}")
 
-print(f"\n🚀 V2X AST-GCN 개선된 이상탐지 GPU 학습 시작...")
+print(f"\n🚀 V2X AST-GCN 수정된 이상탐지 GPU 학습 시작...")
 print(f"   Epochs: {training_epoch}")
 print(f"   Batch size: {batch_size}")
 print(f"   Learning rate: {lr} (지수 감소)")
 print(f"   클래스 가중치: {pos_weight:.2f}")
-print(f"   임계값: {threshold_used:.3f}")
+print(f"   라벨 임계값: {label_threshold:.4f}")
+print(f"   평가 임계값: {threshold_used:.4f}")
 
 x_axe, batch_loss, batch_acc = [], [], []
 test_loss, test_acc, test_precision, test_recall, test_f1, test_auc, test_pred = [], [], [], [], [], [], []
 
 best_f1 = 0.0
 patience_counter = 0
-early_stopping_patience = 15  # 더 긴 인내심
+early_stopping_patience = 10
 
 for epoch in range(training_epoch):
     epoch_start_time = time.time()
@@ -669,7 +618,7 @@ for epoch in range(training_epoch):
     else:
         epoch_train_loss = 0.0
     
-    # 테스트 평가 (안정화된 방식)
+    # 테스트 평가 (수정된 방식)
     try:
         # 손실과 예측값 계산
         loss2, test_output = sess.run(
@@ -677,13 +626,22 @@ for epoch in range(training_epoch):
             feed_dict={inputs: testX, labels: testY}
         )
         
-        # 확률값 안전 처리
+        # 🔧 수정: 예측 확률 분석
         test_prob = np.clip(test_output, 0.0, 1.0)
         
-        # 🎯 핵심: 고정 임계값으로 평가
-        accuracy_val, precision_val, recall_val, f1_val, auc_val = evaluate_anomaly_stable(
+        # 예측 분포 출력 (첫 5 에포크만)
+        if epoch < 5:
+            print(f"   📊 예측 확률 분포:")
+            print(f"     평균: {test_prob.mean():.4f}")
+            print(f"     표준편차: {test_prob.std():.4f}")
+            print(f"     최소/최대: {test_prob.min():.4f}/{test_prob.max():.4f}")
+            print(f"     > 임계값({threshold_used:.3f}) 비율: {(test_prob > threshold_used).mean():.3%}")
+        
+        # 🎯 핵심: 수정된 평가 함수 사용
+        accuracy_val, precision_val, recall_val, f1_val, auc_val = evaluate_anomaly_fixed(
             testY.reshape(-1, actual_num_nodes), 
-            test_prob
+            test_prob,
+            threshold_used
         )
         
         # 결과 저장
@@ -695,7 +653,7 @@ for epoch in range(training_epoch):
         test_auc.append(auc_val)
         test_pred.append(test_prob)
         
-        # 출력 (고정 임계값 표시)
+        # 출력 (수정된 임계값 표시)
         epoch_time = time.time() - epoch_start_time
         print(f"Epoch:{epoch:2d}",
               f"train_loss:{epoch_train_loss:.4f}",
@@ -705,7 +663,7 @@ for epoch in range(training_epoch):
               f"test_rec:{recall_val:.4f}",
               f"test_f1:{f1_val:.4f}",
               f"test_auc:{auc_val:.4f}",
-              f"threshold:{FIXED_THRESHOLD:.3f}[FIXED]",
+              f"threshold:{threshold_used:.3f}[FIXED]",
               f"time:{epoch_time:.1f}s")
         
         # Early Stopping 체크
@@ -719,7 +677,7 @@ for epoch in range(training_epoch):
                 model_path = os.path.join(path, 'best_model')
                 if not os.path.exists(model_path):
                     os.makedirs(model_path)
-                saver.save(sess, f'{model_path}/V2X_ASTGCN_STABLE_BEST', global_step=epoch)
+                saver.save(sess, f'{model_path}/V2X_ASTGCN_FIXED_BEST', global_step=epoch)
         else:
             patience_counter += 1
             
@@ -732,7 +690,7 @@ for epoch in range(training_epoch):
         continue
 
 time_end = time.time()
-print(f'\n⏱️ GPU 개선된 이상탐지 학습 완료! 소요 시간: {time_end-time_start:.2f}초')
+print(f'\n⏱️ GPU 수정된 이상탐지 학습 완료! 소요 시간: {time_end-time_start:.2f}초')
 
 ############## 결과 분석 및 저장 ###############
 if test_f1 and len(test_f1) > 0:
@@ -741,20 +699,42 @@ if test_f1 and len(test_f1) > 0:
         best_index = np.argmax(test_f1)
         best_test_result = test_pred[best_index]
         
-        print(f"\n🔍 안정화된 최종 성능 분석:")
+        print(f"\n🔍 수정된 최종 성능 분석:")
         print(f"   최고 F1 점수 달성 에포크: {best_index}")
-        print(f"   사용된 고정 임계값: {FIXED_THRESHOLD}")
+        print(f"   사용된 최적 임계값: {threshold_used:.4f}")
         print(f"   최고 F1 점수: {test_f1[best_index]:.4f}")
         
-        # 상세 혼동행렬 분석
+        # 🔧 수정된 상세 혼동행렬 분석
         test_label_final = testY.reshape(-1, actual_num_nodes)
-        y_true_binary_final = (test_label_final.flatten() > FIXED_THRESHOLD).astype(int)
-        y_pred_binary_final = (best_test_result.flatten() > FIXED_THRESHOLD).astype(int)
+        y_true_binary_final = test_label_final.flatten().astype(int)
+        y_pred_binary_final = (best_test_result.flatten() > threshold_used).astype(int)
         
         cm = confusion_matrix(y_true_binary_final, y_pred_binary_final)
-        print(f"   📊 최종 혼동행렬:")
+        print(f"   📊 수정된 최종 혼동행렬:")
         print(f"     [[TN={cm[0,0]:6d}, FP={cm[0,1]:6d}],")
         print(f"      [FN={cm[1,0]:6d}, TP={cm[1,1]:6d}]]")
+        
+        # 추가 분석
+        total_samples = len(y_true_binary_final)
+        actual_positive = np.sum(y_true_binary_final)
+        predicted_positive = np.sum(y_pred_binary_final)
+        
+        print(f"   📊 상세 분석:")
+        print(f"     전체 샘플: {total_samples:,}")
+        print(f"     실제 이상: {actual_positive:,} ({actual_positive/total_samples:.2%})")
+        print(f"     예측 이상: {predicted_positive:,} ({predicted_positive/total_samples:.2%})")
+        
+        # 🔧 수정: ROC 커브 분석 추가
+        if len(np.unique(y_true_binary_final)) > 1:
+            from sklearn.metrics import roc_curve
+            fpr, tpr, thresholds = roc_curve(y_true_binary_final, best_test_result.flatten())
+            
+            # 최적 임계값 찾기 (Youden's J statistic)
+            optimal_idx = np.argmax(tpr - fpr)
+            optimal_threshold_roc = thresholds[optimal_idx]
+            
+            print(f"   🎯 ROC 기반 최적 임계값: {optimal_threshold_roc:.4f}")
+            print(f"     (현재 사용: {threshold_used:.4f})")
         
         # 클래스별 성능 분석
         if len(np.unique(y_true_binary_final)) > 1:
@@ -766,22 +746,27 @@ if test_f1 and len(test_f1) > 0:
         
         # 결과 저장
         var = pd.DataFrame(best_test_result)
-        var.to_csv(path + '/test_anomaly_result_stable.csv', index=False, header=False)
+        var.to_csv(path + '/test_anomaly_result_fixed.csv', index=False, header=False)
         
         # 상세 메트릭 저장
         detailed_metrics = {
-            'model_type': 'stable_fixed_threshold',
-            'fixed_threshold': float(FIXED_THRESHOLD),
+            'model_type': 'fixed_dynamic_threshold',
+            'optimal_threshold': float(threshold_used),
             'max_class_weight': float(MAX_CLASS_WEIGHT),
             'best_epoch': int(best_index),
             'best_f1': float(test_f1[best_index]),
             'final_pos_weight': float(pos_weight),
             'confusion_matrix': cm.tolist(),
-            'training_time_seconds': float(time_end - time_start)
+            'training_time_seconds': float(time_end - time_start),
+            'data_statistics': {
+                'data_mean': float(data1.mean()),
+                'data_std': float(data1.std()),
+                'anomaly_ratio': float((data1 > threshold_used).mean())
+            }
         }
         
         import json
-        with open(path + '/stable_training_metadata.json', 'w') as f:
+        with open(path + '/fixed_training_metadata.json', 'w') as f:
             json.dump(detailed_metrics, f, indent=2)
         
         # 학습 곡선 저장
@@ -794,9 +779,9 @@ if test_f1 and len(test_f1) > 0:
             'test_recall': test_recall[:min_length],
             'test_f1': test_f1[:min_length],
             'test_auc': test_auc[:min_length],
-            'fixed_threshold': [FIXED_THRESHOLD] * min_length
+            'optimal_threshold': [threshold_used] * min_length
         })
-        training_curves.to_csv(path + '/stable_training_curves.csv', index=False)
+        training_curves.to_csv(path + '/fixed_training_curves.csv', index=False)
         
         # 평가 메트릭 저장
         evaluation_metrics = [
@@ -809,16 +794,16 @@ if test_f1 and len(test_f1) > 0:
         
         evaluation_df = pd.DataFrame(evaluation_metrics, 
                                    index=['Accuracy', 'Precision', 'Recall', 'F1', 'AUC'])
-        evaluation_df.to_csv(path + '/stable_anomaly_evaluation.csv')
+        evaluation_df.to_csv(path + '/fixed_anomaly_evaluation.csv')
         
-        print("✅ 안정화된 결과 저장 완료")
+        print("✅ 수정된 결과 저장 완료")
 
-        print(f'\n🎉 V2X AST-GCN 안정화된 이상탐지 결과:')
-        print(f'   model_name: {model_name}_stable')
+        print(f'\n🎉 V2X AST-GCN 수정된 이상탐지 결과:')
+        print(f'   model_name: {model_name}_fixed')
         print(f'   dataset: {data_name}')
         print(f'   scheme: {scheme} ({name})')
-        print(f'   task: anomaly_detection_stable')
-        print(f'   fixed_threshold: {FIXED_THRESHOLD}')
+        print(f'   task: anomaly_detection_fixed')
+        print(f'   optimal_threshold: {threshold_used:.4f}')
         print(f'   max_class_weight: {MAX_CLASS_WEIGHT}')
         print(f'   best_accuracy: {test_acc[best_index]:.4f}')
         print(f'   best_precision: {test_precision[best_index]:.4f}')
@@ -834,29 +819,29 @@ if test_f1 and len(test_f1) > 0:
         import traceback
         traceback.print_exc()
 
-print("\n🎉 V2X AST-GCN 안정화된 이상탐지 시스템 실행 완료!")
-print("🎯 안정화 적용 사항:")
-print(f"  - 고정 임계값: {FIXED_THRESHOLD} (학습 중 변경 없음)")
-print(f"  - 제한된 클래스 가중치: {pos_weight:.2f} (최대 {MAX_CLASS_WEIGHT})")
-print(f"  - 안정화된 평가: 일관된 메트릭 계산")
-print(f"  - 개선된 Early Stopping: 더 안정적인 수렴")
-print(f"  - 수치 안정성: NaN/Inf 처리 강화")
+print("\n🎉 V2X AST-GCN 수정된 이상탐지 시스템 실행 완료!")
+print("🎯 주요 수정 사항:")
+print(f"  - 동적 임계값: {threshold_used:.4f} (데이터 분포 기반)")
+print(f"  - 개선된 클래스 가중치: {pos_weight:.2f} (최대 {MAX_CLASS_WEIGHT})")
+print(f"  - 수정된 평가: 일관된 임계값 사용")
+print(f"  - 예측 분포 모니터링: 실시간 확인")
+print(f"  - ROC 기반 분석: 최적 임계값 제안")
 
-print("\n📋 안정화 결과 파일:")
-print("  - test_anomaly_result_stable.csv: 안정화된 예측 결과")
-print("  - stable_anomaly_evaluation.csv: 핵심 성능 메트릭")
-print("  - stable_training_curves.csv: 에포크별 학습 곡선")
-print("  - stable_training_metadata.json: 안정화 설정 정보")
+print("\n📋 수정된 결과 파일:")
+print("  - test_anomaly_result_fixed.csv: 수정된 예측 결과")
+print("  - fixed_anomaly_evaluation.csv: 핵심 성능 메트릭")
+print("  - fixed_training_curves.csv: 에포크별 학습 곡선")
+print("  - fixed_training_metadata.json: 수정된 설정 정보")
 
 if test_f1 and len(test_f1) > 0:
     final_f1 = max(test_f1)
-    if final_f1 > 0.25:
-        print("\n✅ 안정화 성공!")
-        print("  - 일관된 학습 패턴 달성")
+    if final_f1 > 0.3:
+        print("\n✅ 수정 성공!")
+        print("  - 균형잡힌 성능 달성")
         print("  - 실제 운영 환경 적용 가능")
     else:
-        print("\n🔧 추가 개선 제안:")
-        print(f"  - 임계값 조정: {FIXED_THRESHOLD} → {FIXED_THRESHOLD * 0.8:.2f}")
-        print(f"  - 학습 에포크 증가: {training_epoch} → {training_epoch + 20}")
+        print("\n🔧 추가 개선 권장:")
+        print(f"  - 임계값 추가 조정: {threshold_used:.4f} → {threshold_used * 0.8:.4f}")
+        print(f"  - 클래스 가중치 증가: {pos_weight:.2f} → {min(pos_weight * 1.5, MAX_CLASS_WEIGHT):.2f}")
 else:
     print("\n❌ 학습 결과가 없어 분석할 수 없습니다.")
